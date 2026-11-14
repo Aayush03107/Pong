@@ -69,7 +69,7 @@ static void centerX(sf::Text& t, float width, float y)
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
-    auto serverIp = sf::IpAddress::resolve("16.179.132.221");
+    auto serverIp = sf::IpAddress::resolve("3.26.50.54");
     
     if (!serverIp) {
         std::cerr << "Could not resolve server IP\n";
@@ -433,11 +433,14 @@ int main()
                 }
 
                 // Lerp render positions toward server targets every frame.
-                const float LERP = 0.3f;
-                renderBallX += (targetBallX - renderBallX) * LERP;
-                renderBallY += (targetBallY - renderBallY) * LERP;
-                renderP1Y   += (targetP1Y   - renderP1Y)   * LERP;
-                renderP2Y   += (targetP2Y   - renderP2Y)   * LERP;
+                // Speed constant (units/sec) — tune this to taste.
+                // Higher = snappier, lower = smoother/laggier.
+                const float LERP_SPEED = 10.f;
+                const float lerpT = 1.f - std::exp(-LERP_SPEED * dt);
+                renderBallX += (targetBallX - renderBallX) * lerpT;
+                renderBallY += (targetBallY - renderBallY) * lerpT;
+                renderP1Y   += (targetP1Y   - renderP1Y)   * lerpT;
+                renderP2Y   += (targetP2Y   - renderP2Y)   * lerpT;
 
                 ball.ball.setPosition({renderBallX, renderBallY});
                 p1.setPositionY(renderP1Y);
