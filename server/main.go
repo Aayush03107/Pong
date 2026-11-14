@@ -20,7 +20,7 @@ const (
 	BallRadius   = 12.0
 
 	DefaultBallSpeed   = 300.0
-	DefaultPaddleSpeed = 300.0
+	DefaultPaddleSpeed = 600.0
 
 	TickRate  = 60 // Hz
 	WinScore  = 5

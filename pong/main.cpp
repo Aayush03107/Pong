@@ -466,7 +466,7 @@ int main()
                 renderBallY += (targetBallY - renderBallY) * CORR;
 
                 // Paddles: lerp for smooth visual movement.
-                const float LERP_SPEED = 10.f;
+                const float LERP_SPEED = 20.f;
                 const float lerpT = 1.f - std::exp(-LERP_SPEED * dt);
                 renderP1Y   += (targetP1Y   - renderP1Y)   * lerpT;
                 renderP2Y   += (targetP2Y   - renderP2Y)   * lerpT;
