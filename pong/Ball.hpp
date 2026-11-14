@@ -1,5 +1,7 @@
 #pragma once
 #include <SFML/Graphics.hpp>
+#include <algorithm>
+#include "Difficulty.hpp"
 
 class Ball {
 public:
@@ -21,7 +23,16 @@ public:
     sf::Vector2f  GetVelocity() const;
     sf::FloatRect getBounds()   const;
 
+    // Difficulty-based progression (AI mode).
+    void setDifficulty(const Difficulty& d);
+    void applyRamp(float dt);
+
+    const Difficulty& getDifficulty() const { return diff; }
+    bool hasDifficulty() const { return hasDiff; }
+
 private:
     float initialX;
     float initialY;
+    Difficulty diff{};
+    bool hasDiff = false;
 };

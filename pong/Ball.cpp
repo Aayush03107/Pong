@@ -66,6 +66,11 @@ void Ball::handlePaddleCollision(const sf::FloatRect& paddleBounds)
     offset = std::clamp(offset, -1.f, 1.f);
     float angle = offset * 60.f * (PI / 180.f);
 
+    if (hasDiff) {
+        speed = std::min(speed + diff.hitBoost + (1.f - std::abs(offset)) * diff.centerBonus,
+                         diff.maxSpeed);
+    }
+
     bool  movingRight = velocity.x > 0;
     float dir         = movingRight ? -1.f : 1.f;
 
@@ -87,5 +92,26 @@ sf::Vector2f Ball::GetVelocity() const { return velocity; }
 void Ball::Reset()
 {
     ball.setPosition({initialX, initialY});
-    velocity.x = -velocity.x;   // Serve toward the player who just conceded.
+    float dir = (velocity.x > 0.f) ? -1.f : 1.f;
+    if (hasDiff) {
+        speed = diff.baseSpeed;
+    }
+    float angle = PI / 4.f;
+    velocity.x = dir * speed * std::cos(angle);
+    velocity.y = speed * std::sin(angle);
+}
+
+void Ball::setDifficulty(const Difficulty& d)
+{
+    diff = d;
+    hasDiff = true;
+    setSpeed(d.baseSpeed);
+}
+
+void Ball::applyRamp(float dt)
+{
+    if (hasDiff && diff.ramp > 0.f && speed < diff.maxSpeed) {
+        float newSpeed = std::min(speed + diff.ramp * dt, diff.maxSpeed);
+        setSpeed(newSpeed);
+    }
 }

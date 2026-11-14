@@ -13,6 +13,7 @@
 #include "Network.hpp"
 #include "ResourcePath.hpp"
 #include "Effects.hpp"
+#include "Difficulty.hpp"
 
 
 // Defined here; declared extern in globals.hpp.
@@ -152,10 +153,13 @@ int main()
 
     Effects   effects;
     bool      showFPS           = false;
+    bool      showSpeedInfo     = false;
+    int       currentDiffIndex  = -1;
     float     fpsTimer          = 0.f;
     int       fpsFrames         = 0;
     int       currentFPS        = 60;
     sf::Text  txtFPS            = makeText(16, sf::Color(180, 180, 180));
+    sf::Text  txtSpeed          = makeText(16, sf::Color(180, 180, 180));
     float     totalRunTime      = 0.f;
     float     transitionTimer   = 0.f;
     sf::Clock modeSelectClock;
@@ -216,6 +220,7 @@ int main()
         targetP2Y = renderP2Y = 250.f;
         effects.reset();
         oppConnectedTimer = 0.f;
+        currentDiffIndex = -1;
     };
 
     // Draws the dashed centre divider used during gameplay.
@@ -244,6 +249,9 @@ int main()
                 }
                 else if (key->code == sf::Keyboard::Key::F2) {
                     showFPS = !showFPS;
+                }
+                else if (key->code == sf::Keyboard::Key::F3) {
+                    showSpeedInfo = !showSpeedInfo;
                 }
 
                 // ESC quits from the Game Over screen.
@@ -286,19 +294,21 @@ int main()
                 // Difficulty selection — AI mode only.
                 else if (state == GameState::DifficultySelect)
                 {
-                    float aiSpd = 0.f, react = 0.f, err = 0.f, bSpd = 0.f;
+                    int chosenDiff = -1;
                     if (key->code == sf::Keyboard::Key::Num1)
-                        { aiSpd = 200.f; react = 0.35f; err = 80.f; bSpd = 400.f; }
+                        chosenDiff = 0;
                     else if (key->code == sf::Keyboard::Key::Num2)
-                        { aiSpd = 300.f; react = 0.15f; err = 30.f; bSpd = 500.f; }
+                        chosenDiff = 1;
                     else if (key->code == sf::Keyboard::Key::Num3)
-                        { aiSpd = 450.f; react = 0.05f; err =  5.f; bSpd = 800.f; }
+                        chosenDiff = 2;
 
-                    if (bSpd > 0.f) {
-                        p2.setSpeed(aiSpd);
-                        opponent.changeReactionSpeed(react);
-                        opponent.changeError(err);
-                        ball.setSpeed(bSpd);    // rescales velocity direction
+                    if (chosenDiff != -1) {
+                        currentDiffIndex = chosenDiff;
+                        const auto& d = DIFFS[chosenDiff];
+                        p2.setSpeed(d.aiPaddleSpeed);
+                        opponent.changeReactionSpeed(d.aiReaction);
+                        opponent.changeError(d.aiError);
+                        ball.setDifficulty(d);
                         setState(GameState::Ready);
                     }
                 }
@@ -407,6 +417,8 @@ int main()
                 }
                 else
                 {
+                    ball.applyRamp(dt);
+
                     if (ball.update(dt)) {
                         sndWall.play();
                         effects.onWallHit(ball.ball.getPosition() + sf::Vector2f(12.f, 12.f));
@@ -917,6 +929,24 @@ int main()
         // FPS counter
         if (showFPS) {
             window.draw(txtFPS);
+        }
+
+        // Speed & difficulty debug readout
+        if (showSpeedInfo) {
+            if (isMultiplayer) {
+                float mpSpd = std::sqrt(renderBall.vx * renderBall.vx + renderBall.vy * renderBall.vy);
+                txtSpeed.setString("Speed: " + std::to_string(static_cast<int>(std::round(mpSpd))));
+            } else {
+                std::string diffName = (currentDiffIndex >= 0 && currentDiffIndex < 3)
+                                           ? DIFFS[currentDiffIndex].name
+                                           : "None";
+                txtSpeed.setString("Speed: " + std::to_string(static_cast<int>(std::round(ball.speed))) +
+                                   " (" + diffName + ")");
+            }
+            auto b = txtSpeed.getLocalBounds();
+            txtSpeed.setPosition({static_cast<float>(WindowX) - b.size.x - 15.f,
+                                  static_cast<float>(WindowY) - 28.f});
+            window.draw(txtSpeed);
         }
 
         window.display();

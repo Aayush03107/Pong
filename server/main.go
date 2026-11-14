@@ -21,6 +21,11 @@ const (
 	DefaultBallSpeed   = 300.0
 	DefaultPaddleSpeed = 600.0
 
+	MaxBallSpeed  = 750.0
+	HitSpeedBoost = 20.0
+	CenterBonus   = 40.0
+	RallyRamp     = 6.0
+
 	TickRate  = 60 // Hz
 	WinScore  = 5
 )
@@ -77,23 +82,25 @@ func (p *Paddle) SetSpeed(s float64) {
 // ── Ball ──────────────────────────────────────────────────────────────────────
 
 type Ball struct {
-	X, Y     float64
-	VX, VY   float64
-	Speed    float64
-	InitialX float64
-	InitialY float64
+	X, Y      float64
+	VX, VY    float64
+	Speed     float64
+	BaseSpeed float64
+	InitialX  float64
+	InitialY  float64
 }
 
 func NewBall(x, y, speed float64) *Ball {
 	angle := math.Pi / 4.0
 	return &Ball{
-		X:        x,
-		Y:        y,
-		VX:       speed * math.Cos(angle),
-		VY:       speed * math.Sin(angle),
-		Speed:    speed,
-		InitialX: x,
-		InitialY: y,
+		X:         x,
+		Y:         y,
+		VX:        speed * math.Cos(angle),
+		VY:        speed * math.Sin(angle),
+		Speed:     speed,
+		BaseSpeed: speed,
+		InitialX:  x,
+		InitialY:  y,
 	}
 }
 
@@ -143,6 +150,9 @@ func (b *Ball) HandlePaddleCollision(px, py float64) {
 	}
 	angle := offset * 60.0 * (math.Pi / 180.0)
 
+	// Speed boost: center hits give bigger bonus.
+	b.Speed = math.Min(b.Speed+HitSpeedBoost+(1-math.Abs(offset))*CenterBonus, MaxBallSpeed)
+
 	movingRight := b.VX > 0
 	dir := 1.0
 	if movingRight {
@@ -159,9 +169,17 @@ func (b *Ball) HandlePaddleCollision(px, py float64) {
 // Reset returns the ball to its starting position and reverses horizontal
 // direction to serve toward the player who just conceded.
 func (b *Ball) Reset() {
+	// Serve toward the player who just conceded (reverse horizontal direction).
+	dir := 1.0
+	if b.VX > 0 {
+		dir = -1.0
+	}
 	b.X = b.InitialX
 	b.Y = b.InitialY
-	b.VX = -b.VX
+	b.Speed = b.BaseSpeed
+	angle := math.Pi / 4.0
+	b.VX = dir * b.Speed * math.Cos(angle)
+	b.VY = b.Speed * math.Sin(angle)
 }
 
 // ── Network types ─────────────────────────────────────────────────────────────
@@ -293,6 +311,11 @@ func (g *Game) Update(dt float64, conn *net.UDPConn) bool {
 		if overlaps(g.ball.X, g.ball.Y, paddle.X, paddle.Y) {
 			g.ball.HandlePaddleCollision(paddle.X, paddle.Y)
 		}
+	}
+
+	// Rally ramp: gradually accelerate the ball over time.
+	if g.ball.Speed < MaxBallSpeed {
+		g.ball.SetSpeed(math.Min(g.ball.Speed+RallyRamp*dt, MaxBallSpeed))
 	}
 
 	// Move ball and handle wall bounces.
