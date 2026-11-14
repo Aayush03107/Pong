@@ -170,6 +170,8 @@ int main()
     float targetP1Y   = 250.f, targetP2Y   = 250.f;
     float renderBallX = 388.f, renderBallY = 288.f; // interpolated render positions
     float renderP1Y   = 250.f, renderP2Y   = 250.f;
+    float velBallX    = 0.f,   velBallY    = 0.f;   // dead reckoning: last known server velocity
+    float prevVelX    = 0.f,   prevVelY    = 0.f;   // previous velocity for sound detection
     sf::Clock lastStateReceived;   // for disconnect detection
     sf::Clock waitingClock;        // tracks how long we've been in Waiting state
     // ── Main loop ─────────────────────────────────────────────────────────────
@@ -265,14 +267,15 @@ int main()
                     R"({"type":"ASSIGN","pid":%d})", &pid) == 1)
                 { myPlayerId = pid; continue; }
 
-                float bx, by, p1y, p2y; int s1, s2;
+                float bx, by, vx, vy, p1y, p2y; int s1, s2;
                 if (std::sscanf(raw->c_str(),
-                    R"({"type":"STATE","bx":%f,"by":%f,"p1y":%f,"p2y":%f,"s1":%d,"s2":%d})",
-                    &bx, &by, &p1y, &p2y, &s1, &s2) == 6)
+                    R"({"type":"STATE","bx":%f,"by":%f,"vx":%f,"vy":%f,"p1y":%f,"p2y":%f,"s1":%d,"s2":%d})",
+                    &bx, &by, &vx, &vy, &p1y, &p2y, &s1, &s2) == 8)
                 {
                     // Snap render positions so there is no lerp artefact on entry.
                     targetBallX = renderBallX = bx;
                     targetBallY = renderBallY = by;
+                    velBallX = vx; velBallY = vy;
                     targetP1Y   = renderP1Y   = p1y;
                     targetP2Y   = renderP2Y   = p2y;
                     lastStateReceived.restart();
@@ -368,6 +371,7 @@ int main()
                 // Drain all queued packets; keep only the latest STATE values.
                 bool  gotState  = false;
                 float latestBx  = targetBallX, latestBy  = targetBallY;
+                float latestVx  = velBallX,    latestVy  = velBallY;
                 float latestP1y = targetP1Y,   latestP2y = targetP2Y;
                 int   latestS1  = scoreP1,     latestS2  = scoreP2;
 
@@ -388,13 +392,14 @@ int main()
                         break;
                     }
 
-                    float bx, by, p1y, p2y; int s1, s2;
+                    float bx, by, vx, vy, p1y, p2y; int s1, s2;
                     if (std::sscanf(raw->c_str(),
-                        R"({"type":"STATE","bx":%f,"by":%f,"p1y":%f,"p2y":%f,"s1":%d,"s2":%d})",
-                        &bx, &by, &p1y, &p2y, &s1, &s2) == 6)
+                        R"({"type":"STATE","bx":%f,"by":%f,"vx":%f,"vy":%f,"p1y":%f,"p2y":%f,"s1":%d,"s2":%d})",
+                        &bx, &by, &vx, &vy, &p1y, &p2y, &s1, &s2) == 8)
                     {
                         gotState  = true;
                         latestBx  = bx;  latestBy  = by;
+                        latestVx  = vx;  latestVy  = vy;
                         latestP1y = p1y; latestP2y = p2y;
                         latestS1  = s1;  latestS2  = s2;
                     }
@@ -405,21 +410,31 @@ int main()
                     targetBallX = latestBx;  targetBallY = latestBy;
                     targetP1Y   = latestP1y; targetP2Y   = latestP2y;
 
-                    bool  scoreChanged = (latestS1 != scoreP1 || latestS2 != scoreP2);
-                    float dX = latestBx - prevBallX;
-                    float dY = latestBy - prevBallY;
+                    bool scoreChanged = (latestS1 != scoreP1 || latestS2 != scoreP2);
+
+                    // Sound: detect bounces via velocity sign change (more accurate than position delta).
                     if (!scoreChanged) {
-                        if (prevBallDX * dX < 0.f) sndPaddle.play();
-                        if (prevBallDY * dY < 0.f) sndWall.play();
+                        if (prevVelX * latestVx < 0.f) sndPaddle.play();
+                        if (prevVelY * latestVy < 0.f) sndWall.play();
                     }
-                    prevBallX  = latestBx;  prevBallY  = latestBy;
-                    prevBallDX = dX;        prevBallDY = dY;
+                    prevVelX = latestVx; prevVelY = latestVy;
+                    velBallX = latestVx; velBallY = latestVy;
 
                     if (scoreChanged) {
                         scoreP1 = latestS1; scoreP2 = latestS2;
                         txtP1Score.setString(std::to_string(scoreP1));
                         txtP2Score.setString(std::to_string(scoreP2));
                         sndScore.play();
+                        // Snap ball immediately on score reset — no dead reckoning across a reset.
+                        renderBallX = latestBx;
+                        renderBallY = latestBy;
+                    } else {
+                        // If prediction drifted too far (e.g. unexpected bounce), snap to correct.
+                        float ex = latestBx - renderBallX, ey = latestBy - renderBallY;
+                        if (ex * ex + ey * ey > 150.f * 150.f) {
+                            renderBallX = latestBx;
+                            renderBallY = latestBy;
+                        }
                     }
                 }
 
@@ -432,13 +447,27 @@ int main()
                     state = GameState::ModeSelect;
                 }
 
-                // Lerp render positions toward server targets every frame.
-                // Speed constant (units/sec) — tune this to taste.
-                // Higher = snappier, lower = smoother/laggier.
+                // ── Dead reckoning ────────────────────────────────────────────
+                // Advance ball using last known server velocity — smooth motion
+                // between packets regardless of network jitter.
+                renderBallX += velBallX * dt;
+                renderBallY += velBallY * dt;
+
+                // Mirror wall bounces locally so prediction stays in sync.
+                if (renderBallY <= 0.f || renderBallY + 24.f >= 600.f) {
+                    velBallY = -velBallY;
+                    renderBallY = std::max(0.f, std::min(renderBallY, 576.f));
+                }
+
+                // Gentle correction toward server authority (handles paddle
+                // bounces the client didn't predict).
+                const float CORR = 1.f - std::exp(-8.f * dt);
+                renderBallX += (targetBallX - renderBallX) * CORR;
+                renderBallY += (targetBallY - renderBallY) * CORR;
+
+                // Paddles: lerp for smooth visual movement.
                 const float LERP_SPEED = 10.f;
                 const float lerpT = 1.f - std::exp(-LERP_SPEED * dt);
-                renderBallX += (targetBallX - renderBallX) * lerpT;
-                renderBallY += (targetBallY - renderBallY) * lerpT;
                 renderP1Y   += (targetP1Y   - renderP1Y)   * lerpT;
                 renderP2Y   += (targetP2Y   - renderP2Y)   * lerpT;
 

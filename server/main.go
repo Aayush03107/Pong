@@ -19,7 +19,7 @@ const (
 	PaddleHeight = 100.0
 	BallRadius   = 12.0
 
-	DefaultBallSpeed   = 500.0
+	DefaultBallSpeed   = 300.0
 	DefaultPaddleSpeed = 300.0
 
 	TickRate  = 60 // Hz
@@ -197,6 +197,8 @@ type StateMessage struct {
 	Type   string  `json:"type"`
 	BallX  float64 `json:"bx"`
 	BallY  float64 `json:"by"`
+	BallVX float64 `json:"vx"`
+	BallVY float64 `json:"vy"`
 	P1Y    float64 `json:"p1y"`
 	P2Y    float64 `json:"p2y"`
 	Score1 int     `json:"s1"`
@@ -312,6 +314,8 @@ func (g *Game) Update(dt float64, conn *net.UDPConn) bool {
 		Type:   "STATE",
 		BallX:  g.ball.X,
 		BallY:  g.ball.Y,
+		BallVX: g.ball.VX,
+		BallVY: g.ball.VY,
 		P1Y:    g.paddles[0].Y,
 		P2Y:    g.paddles[1].Y,
 		Score1: g.score[0],
