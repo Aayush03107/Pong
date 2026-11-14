@@ -438,7 +438,6 @@ func handleConn(conn *net.UDPConn, msg Message, client *Client) {
 	if msg.Typeo == "QUIT" {
 		muMap.Lock()
 		if client.gameId == 0 {
-			// Still in the lobby — just remove from the waiting slot and map.
 			if waitingClient == client {
 				waitingClient = nil
 			}
@@ -453,7 +452,7 @@ func handleConn(conn *net.UDPConn, msg Message, client *Client) {
 		}
 		log.Printf("Client %s quit", client.addr)
 		return
-	}
+	};
 
 	var dir int
 	switch msg.Action {
