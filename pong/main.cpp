@@ -66,6 +66,17 @@ static void centerX(sf::Text& t, float width, float y)
     t.setPosition({(width - b.size.x) / 2.f - b.position.x, y});
 }
 
+// ── Dead-reckoning helper ─────────────────────────────────────────────────────
+struct BallState { float x, y, vx, vy; };
+static void stepBall(BallState& b, float dt)
+{
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    const float maxY = 600.f - 24.f;   // WindowY - 2*BallRadius
+    if      (b.y < 0.f)   { b.y = -b.y;             b.vy = -b.vy; }
+    else if (b.y > maxY)  { b.y = 2.f*maxY - b.y;   b.vy = -b.vy; }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
@@ -81,7 +92,7 @@ int main()
         sf::VideoMode({static_cast<unsigned>(WindowX),
                        static_cast<unsigned>(WindowY)}),
         "Pong", sf::Style::Close);
-    window.setFramerateLimit(60);
+    window.setVerticalSyncEnabled(true);
 
     // Font — expected relative to the executable (CMake copies assets/ there).
     sf::Font font;
@@ -138,6 +149,28 @@ int main()
     sf::Clock pauseClock;
     sf::Clock frameClock;
 
+    bool pressedup = false;
+    bool pressedDown = false;
+    int  lastSentDir = 0;  // -1 = up, 0 = stop, 1 = down
+    float prevBallX = 388.f, prevBallY = 288.f;
+    float prevBallDX = 0.f,  prevBallDY = 0.f;
+    int   myPlayerId  = 0;         // 1 or 2, assigned by server ASSIGN message
+    int   resendTimer = 0;         // counts frames since last input was sent
+    float targetP1Y   = 250.f, targetP2Y   = 250.f;
+    float renderP1Y   = 250.f, renderP2Y   = 250.f;
+    float prevVelX    = 0.f,   prevVelY    = 0.f;   // previous server velocity for sound detection
+    // ── Multiplayer-specific state ────────────────────────────────────────────
+    BallState renderBall   = {388.f, 288.f, 0.f, 0.f}; // dead-reckoned render ball
+    uint32_t  lastTick     = 0;          // out-of-order UDP rejection
+    float     oneWayLatency = 0.05f;     // estimated half-RTT in seconds
+    constexpr float MP_PADDLE_SPEED = 600.f;
+    float     myPaddleY    = 250.f;      // client-side predicted Y for my paddle
+    sf::Clock lastMoveClock;             // time since my paddle last moved
+    sf::Clock pingClock;                 // time since last PING sent
+    sf::Clock pingRttClock;             // RTT measurement of outstanding PING
+    bool      pingPending  = false;      // a PING is in-flight
+    sf::Clock lastStateReceived;         // for disconnect detection
+    sf::Clock waitingClock;             // tracks how long we've been in Waiting state
     // Resets everything for a fresh match (called when returning to menu).
     auto resetMatch = [&]() {
         scoreP1 = scoreP2 = 0;
@@ -148,6 +181,15 @@ int main()
         p1.Reset();
         p2.Reset();
         opponent.Reset();
+        // Reset multiplayer-specific state.
+        lastTick    = 0;
+        myPlayerId  = 0;
+        myPaddleY   = 250.f;
+        pingPending = false;
+        renderBall  = {388.f, 288.f, 0.f, 0.f};
+        prevVelX = prevVelY = 0.f;
+        targetP1Y = renderP1Y = 250.f;
+        targetP2Y = renderP2Y = 250.f;
     };
 
     // Draws the dashed centre divider used during gameplay.
@@ -159,21 +201,6 @@ int main()
             window.draw(seg);
         }
     };
-    bool pressedup = false;
-    bool pressedDown = false;
-    int  lastSentDir = 0;  // -1 = up, 0 = stop, 1 = down
-    float prevBallX = 388.f, prevBallY = 288.f;
-    float prevBallDX = 0.f,  prevBallDY = 0.f;
-    int   myPlayerId  = 0;         // 1 or 2, assigned by server ASSIGN message
-    int   resendTimer = 0;         // counts frames since last input was sent
-    float targetBallX = 388.f, targetBallY = 288.f; // server-authoritative targets
-    float targetP1Y   = 250.f, targetP2Y   = 250.f;
-    float renderBallX = 388.f, renderBallY = 288.f; // interpolated render positions
-    float renderP1Y   = 250.f, renderP2Y   = 250.f;
-    float velBallX    = 0.f,   velBallY    = 0.f;   // dead reckoning: last known server velocity
-    float prevVelX    = 0.f,   prevVelY    = 0.f;   // previous velocity for sound detection
-    sf::Clock lastStateReceived;   // for disconnect detection
-    sf::Clock waitingClock;        // tracks how long we've been in Waiting state
     // ── Main loop ─────────────────────────────────────────────────────────────
     while (window.isOpen())
     {
@@ -262,22 +289,33 @@ int main()
             }
 
             while (auto raw = network.receiveMessage()) {
+                // Handle PONG (latency reply) — skip without mis-parsing.
+                if (*raw == "PONG") {
+                    if (pingPending) {
+                        float rtt = pingRttClock.getElapsedTime().asSeconds();
+                        oneWayLatency = oneWayLatency * 0.8f + (rtt * 0.5f) * 0.2f;
+                        oneWayLatency = std::max(0.01f, std::min(oneWayLatency, 0.2f));
+                        pingPending = false;
+                    }
+                    continue;
+                }
+
                 int pid;
                 if (std::sscanf(raw->c_str(),
                     R"({"type":"ASSIGN","pid":%d})", &pid) == 1)
                 { myPlayerId = pid; continue; }
 
-                float bx, by, vx, vy, p1y, p2y; int s1, s2;
+                uint32_t t; float bx, by, vx, vy, p1y, p2y; int s1, s2;
                 if (std::sscanf(raw->c_str(),
-                    R"({"type":"STATE","bx":%f,"by":%f,"vx":%f,"vy":%f,"p1y":%f,"p2y":%f,"s1":%d,"s2":%d})",
-                    &bx, &by, &vx, &vy, &p1y, &p2y, &s1, &s2) == 8)
+                    R"({"type":"STATE","t":%u,"bx":%f,"by":%f,"vx":%f,"vy":%f,"p1y":%f,"p2y":%f,"s1":%d,"s2":%d})",
+                    &t, &bx, &by, &vx, &vy, &p1y, &p2y, &s1, &s2) == 9)
                 {
-                    // Snap render positions so there is no lerp artefact on entry.
-                    targetBallX = renderBallX = bx;
-                    targetBallY = renderBallY = by;
-                    velBallX = vx; velBallY = vy;
-                    targetP1Y   = renderP1Y   = p1y;
-                    targetP2Y   = renderP2Y   = p2y;
+                    // Snap all positions on initial entry; initialise renderBall.
+                    lastTick    = t;
+                    renderBall  = {bx, by, vx, vy};
+                    myPaddleY   = (myPlayerId == 2) ? p2y : p1y;
+                    targetP1Y   = renderP1Y = p1y;
+                    targetP2Y   = renderP2Y = p2y;
                     lastStateReceived.restart();
                     state = GameState::Playing;
                     frameClock.restart();
@@ -349,8 +387,16 @@ int main()
             else
             {
                 // ── Multiplayer: server-authoritative ─────────────────────────
-                // Send direction on change OR every 10 frames as keep-alive
-                // so a single dropped packet doesn't freeze the paddle.
+
+                // ── PING for latency measurement (every 1 s) ──────────────────
+                if (!pingPending && pingClock.getElapsedTime().asSeconds() >= 1.f) {
+                    network.sendMessage(R"({"Typeo":"PING"})");
+                    pingRttClock.restart();
+                    pingPending = true;
+                    pingClock.restart();
+                }
+
+                // ── Input: send on change OR every 10 frames (keep-alive) ─────
                 int wantDir = 0;
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Up) &&
                     !sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down))
@@ -368,14 +414,26 @@ int main()
                     resendTimer = 0;
                 }
 
-                // Drain all queued packets; keep only the latest STATE values.
-                bool  gotState  = false;
-                float latestBx  = targetBallX, latestBy  = targetBallY;
-                float latestVx  = velBallX,    latestVy  = velBallY;
-                float latestP1y = targetP1Y,   latestP2y = targetP2Y;
-                int   latestS1  = scoreP1,     latestS2  = scoreP2;
+                // ── Drain all queued packets; keep highest-tick STATE ─────────
+                bool     gotState  = false;
+                uint32_t latestT   = lastTick;
+                float    latestBx  = renderBall.x, latestBy  = renderBall.y;
+                float    latestVx  = renderBall.vx, latestVy  = renderBall.vy;
+                float    latestP1y = targetP1Y,   latestP2y = targetP2Y;
+                int      latestS1  = scoreP1,     latestS2  = scoreP2;
 
                 while (auto raw = network.receiveMessage()) {
+                    // PONG reply.
+                    if (*raw == "PONG") {
+                        if (pingPending) {
+                            float rtt = pingRttClock.getElapsedTime().asSeconds();
+                            oneWayLatency = oneWayLatency * 0.8f + (rtt * 0.5f) * 0.2f;
+                            oneWayLatency = std::max(0.01f, std::min(oneWayLatency, 0.2f));
+                            pingPending = false;
+                        }
+                        continue;
+                    }
+
                     int pid;
                     if (std::sscanf(raw->c_str(),
                         R"({"type":"ASSIGN","pid":%d})", &pid) == 1)
@@ -392,12 +450,15 @@ int main()
                         break;
                     }
 
-                    float bx, by, vx, vy, p1y, p2y; int s1, s2;
+                    uint32_t t; float bx, by, vx, vy, p1y, p2y; int s1, s2;
                     if (std::sscanf(raw->c_str(),
-                        R"({"type":"STATE","bx":%f,"by":%f,"vx":%f,"vy":%f,"p1y":%f,"p2y":%f,"s1":%d,"s2":%d})",
-                        &bx, &by, &vx, &vy, &p1y, &p2y, &s1, &s2) == 8)
+                        R"({"type":"STATE","t":%u,"bx":%f,"by":%f,"vx":%f,"vy":%f,"p1y":%f,"p2y":%f,"s1":%d,"s2":%d})",
+                        &t, &bx, &by, &vx, &vy, &p1y, &p2y, &s1, &s2) == 9)
                     {
+                        // Discard out-of-order (stale) packets.
+                        if (t <= lastTick) continue;
                         gotState  = true;
+                        latestT   = t;
                         latestBx  = bx;  latestBy  = by;
                         latestVx  = vx;  latestVy  = vy;
                         latestP1y = p1y; latestP2y = p2y;
@@ -406,40 +467,50 @@ int main()
                 }
 
                 if (gotState && state == GameState::Playing) {
+                    lastTick = latestT;
                     lastStateReceived.restart();
-                    targetBallX = latestBx;  targetBallY = latestBy;
-                    targetP1Y   = latestP1y; targetP2Y   = latestP2y;
+                    targetP1Y = latestP1y; targetP2Y = latestP2y;
 
                     bool scoreChanged = (latestS1 != scoreP1 || latestS2 != scoreP2);
 
-                    // Sound: detect bounces via velocity sign change (more accurate than position delta).
+                    // Sound: velocity sign change on the received packets (not render vel).
                     if (!scoreChanged) {
                         if (prevVelX * latestVx < 0.f) sndPaddle.play();
                         if (prevVelY * latestVy < 0.f) sndWall.play();
                     }
                     prevVelX = latestVx; prevVelY = latestVy;
-                    velBallX = latestVx; velBallY = latestVy;
 
                     if (scoreChanged) {
                         scoreP1 = latestS1; scoreP2 = latestS2;
                         txtP1Score.setString(std::to_string(scoreP1));
                         txtP2Score.setString(std::to_string(scoreP2));
                         sndScore.play();
-                        // Snap ball immediately on score reset — no dead reckoning across a reset.
-                        renderBallX = latestBx;
-                        renderBallY = latestBy;
+                        // Snap ball immediately on score reset.
+                        renderBall = {latestBx, latestBy, latestVx, latestVy};
                     } else {
-                        // If prediction drifted too far (e.g. unexpected bounce), snap to correct.
-                        float ex = latestBx - renderBallX, ey = latestBy - renderBallY;
-                        if (ex * ex + ey * ey > 150.f * 150.f) {
-                            renderBallX = latestBx;
-                            renderBallY = latestBy;
+                        // Build authoritative ball state, compensated by one-way latency.
+                        BallState auth{latestBx, latestBy, latestVx, latestVy};
+                        stepBall(auth, oneWayLatency);
+
+                        // Always adopt server velocity.
+                        renderBall.vx = auth.vx;
+                        renderBall.vy = auth.vy;
+
+                        float ex = auth.x - renderBall.x;
+                        float ey = auth.y - renderBall.y;
+                        if (ex * ex + ey * ey > 100.f * 100.f) {
+                            // Large error: snap.
+                            renderBall.x = auth.x;
+                            renderBall.y = auth.y;
+                        } else {
+                            // Small error: single blend step.
+                            renderBall.x += ex * 0.3f;
+                            renderBall.y += ey * 0.3f;
                         }
                     }
                 }
 
-                // Disconnect detection: no STATE for 5 s means the server or
-                // opponent is gone — go back to menu.
+                // Disconnect detection: no STATE for 5 s — go back to menu.
                 if (state == GameState::Playing &&
                     lastStateReceived.getElapsedTime().asSeconds() > 5.f)
                 {
@@ -447,31 +518,50 @@ int main()
                     state = GameState::ModeSelect;
                 }
 
-                // ── Dead reckoning ────────────────────────────────────────────
-                // Advance ball using last known server velocity — smooth motion
-                // between packets regardless of network jitter.
-                renderBallX += velBallX * dt;
-                renderBallY += velBallY * dt;
+                // ── Dead reckoning: advance ball every frame ──────────────────
+                stepBall(renderBall, dt);
 
-                // Mirror wall bounces locally so prediction stays in sync.
-                if (renderBallY <= 0.f || renderBallY + 24.f >= 600.f) {
-                    velBallY = -velBallY;
-                    renderBallY = std::max(0.f, std::min(renderBallY, 576.f));
+                // ── Client-side paddle prediction ─────────────────────────────
+                if (myPlayerId != 0) {
+                    float& myRenderY  = (myPlayerId == 1) ? renderP1Y : renderP2Y;
+                    float& myTargetY  = (myPlayerId == 1) ? targetP1Y : targetP2Y;
+
+                    if (wantDir != 0) {
+                        myPaddleY += wantDir * MP_PADDLE_SPEED * dt;
+                        myPaddleY  = std::max(0.f, std::min(myPaddleY, 500.f));
+                        lastMoveClock.restart();
+                    }
+
+                    float serverErr = myTargetY - myPaddleY;
+                    if (serverErr * serverErr > 60.f * 60.f) {
+                        // Large divergence: snap to server.
+                        myPaddleY = myTargetY;
+                    } else if (wantDir == 0 &&
+                               lastMoveClock.getElapsedTime().asSeconds() > 0.2f) {
+                        // Not moving and settled: ease toward server.
+                        const float ease = 1.f - std::exp(-10.f * dt);
+                        myPaddleY += serverErr * ease;
+                    }
+                    // While moving: trust client prediction, don't correct.
+
+                    myRenderY = myPaddleY;
                 }
 
-                // Gentle correction toward server authority (handles paddle
-                // bounces the client didn't predict).
-                const float CORR = 1.f - std::exp(-8.f * dt);
-                renderBallX += (targetBallX - renderBallX) * CORR;
-                renderBallY += (targetBallY - renderBallY) * CORR;
+                // Opponent paddle: lerp toward server value.
+                {
+                    float& oppRenderY = (myPlayerId == 1) ? renderP2Y : renderP1Y;
+                    float& oppTargetY = (myPlayerId == 1) ? targetP2Y : targetP1Y;
+                    const float lerpT = 1.f - std::exp(-20.f * dt);
+                    oppRenderY += (oppTargetY - oppRenderY) * lerpT;
+                    // If ASSIGN not received yet, lerp both paddles.
+                    if (myPlayerId == 0) {
+                        const float l = 1.f - std::exp(-20.f * dt);
+                        renderP1Y += (targetP1Y - renderP1Y) * l;
+                        renderP2Y += (targetP2Y - renderP2Y) * l;
+                    }
+                }
 
-                // Paddles: lerp for smooth visual movement.
-                const float LERP_SPEED = 20.f;
-                const float lerpT = 1.f - std::exp(-LERP_SPEED * dt);
-                renderP1Y   += (targetP1Y   - renderP1Y)   * lerpT;
-                renderP2Y   += (targetP2Y   - renderP2Y)   * lerpT;
-
-                ball.ball.setPosition({renderBallX, renderBallY});
+                ball.ball.setPosition({renderBall.x, renderBall.y});
                 p1.setPositionY(renderP1Y);
                 p2.setPositionY(renderP2Y);
             }

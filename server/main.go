@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"math"
 	"net"
@@ -195,6 +194,7 @@ type GameOverMessage struct {
 // StateMessage is broadcast to both clients every tick.
 type StateMessage struct {
 	Type   string  `json:"type"`
+	Tick   uint32  `json:"t"`
 	BallX  float64 `json:"bx"`
 	BallY  float64 `json:"by"`
 	BallVX float64 `json:"vx"`
@@ -217,6 +217,7 @@ type Game struct {
 	GameId   int
 	players  [2]*Client
 	score    [2]int
+	tick     uint32
 	mu       sync.Mutex
 	player1  string
 	player2  string
@@ -310,8 +311,10 @@ func (g *Game) Update(dt float64, conn *net.UDPConn) bool {
 
 	gameOver := g.score[0] >= WinScore || g.score[1] >= WinScore
 
+	g.tick++
 	snap := StateMessage{
 		Type:   "STATE",
+		Tick:   g.tick,
 		BallX:  g.ball.X,
 		BallY:  g.ball.Y,
 		BallVX: g.ball.VX,
@@ -410,7 +413,7 @@ func (g *Game) Start(conn *net.UDPConn) {
 // ── Message validation & helpers ──────────────────────────────────────────────
 
 func check(msg Message) bool {
-	if msg.Typeo == "JOIN" || msg.Typeo == "QUIT" {
+	if msg.Typeo == "JOIN" || msg.Typeo == "QUIT" || msg.Typeo == "PING" {
 		return true
 	}
 	if msg.Typeo == "INPUT" {
@@ -426,7 +429,14 @@ func handleConn(conn *net.UDPConn, msg Message, client *Client) {
 		}
 		return
 	}
-	fmt.Printf("Handling %s and %s\n", msg.Typeo, msg.Action)
+
+	// PING — reply immediately without touching game state.
+	if msg.Typeo == "PING" {
+		if _, err := conn.WriteToUDP([]byte("PONG"), client.addr); err != nil {
+			log.Printf("PONG send error to %s: %v", client.addr, err)
+		}
+		return
+	}
 
 	if msg.Typeo == "JOIN" {
 		if _, err := conn.WriteToUDP([]byte("ACK: joined"), client.addr); err != nil {
@@ -452,7 +462,7 @@ func handleConn(conn *net.UDPConn, msg Message, client *Client) {
 		}
 		log.Printf("Client %s quit", client.addr)
 		return
-	};
+	}
 
 	var dir int
 	switch msg.Action {
@@ -498,13 +508,11 @@ func main() {
 
 	addr, err := net.ResolveUDPAddr("udp", ":5050")
 	if err != nil {
-		fmt.Println("Couldn't resolve address:", err)
-		return
+		log.Fatalf("Couldn't resolve address: %v", err)
 	}
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		fmt.Println(err)
-		return
+		log.Fatalf("ListenUDP: %v", err)
 	}
 	defer conn.Close()
 
@@ -540,7 +548,6 @@ func main() {
 	buff := make([]byte, 2048)
 	for {
 		n, clientAddr, err := conn.ReadFromUDP(buff)
-		fmt.Printf("Received message from %s\n", clientAddr.String())
 		if err != nil {
 			log.Printf("Read error: %v", err)
 			continue
@@ -592,9 +599,7 @@ func main() {
 			}
 		}
 		client.lastSeen = time.Now()
-		fmt.Printf("Active clients: %d  Active games: %d\n", len(mp), len(gamesmp))
-
-		go handleConn(conn, msg, client)
 		muMap.Unlock()
+		handleConn(conn, msg, client)
 	}
 }
