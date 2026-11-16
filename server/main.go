@@ -26,6 +26,8 @@ const (
 	CenterBonus   = 40.0
 	RallyRamp     = 6.0
 
+	ServeDelay = 2.5
+
 	TickRate  = 60 // Hz
 	WinScore  = 5
 )
@@ -232,21 +234,24 @@ var muMap         sync.Mutex
 // ── Game ──────────────────────────────────────────────────────────────────────
 
 type Game struct {
-	GameId   int
-	players  [2]*Client
-	score    [2]int
-	tick     uint32
-	mu       sync.Mutex
-	player1  string
-	player2  string
-	ball     *Ball
-	paddles  [2]*Paddle
-	done     chan struct{}
-	stopOnce sync.Once
+	GameId     int
+	players    [2]*Client
+	score      [2]int
+	tick       uint32
+	mu         sync.Mutex
+	player1    string
+	player2    string
+	ball       *Ball
+	paddles    [2]*Paddle
+	serveTimer float64
+	serveVX    float64
+	serveVY    float64
+	done       chan struct{}
+	stopOnce   sync.Once
 }
 
 func NewGame(id int, p1, p2 *Client) *Game {
-	return &Game{
+	g := &Game{
 		GameId:  id,
 		players: [2]*Client{p1, p2},
 		player1: p1.addr.String(),
@@ -258,6 +263,16 @@ func NewGame(id int, p1, p2 *Client) *Game {
 		},
 		done: make(chan struct{}),
 	}
+	g.startServe()
+	return g
+}
+
+func (g *Game) startServe() {
+	g.serveVX = g.ball.VX
+	g.serveVY = g.ball.VY
+	g.ball.VX = 0
+	g.ball.VY = 0
+	g.serveTimer = ServeDelay
 }
 
 // Stop signals the game loop to exit. Safe to call more than once.
@@ -306,30 +321,41 @@ func (g *Game) Update(dt float64, conn *net.UDPConn) bool {
 		}
 	}
 
-	// Ball–paddle collision (checked before moving ball to avoid tunnelling).
-	for _, paddle := range g.paddles {
-		if overlaps(g.ball.X, g.ball.Y, paddle.X, paddle.Y) {
-			g.ball.HandlePaddleCollision(paddle.X, paddle.Y)
+	if g.serveTimer > 0 {
+		g.serveTimer -= dt
+		if g.serveTimer <= 0 {
+			g.serveTimer = 0
+			g.ball.VX = g.serveVX
+			g.ball.VY = g.serveVY
 		}
-	}
+	} else {
+		// Ball–paddle collision (checked before moving ball to avoid tunnelling).
+		for _, paddle := range g.paddles {
+			if overlaps(g.ball.X, g.ball.Y, paddle.X, paddle.Y) {
+				g.ball.HandlePaddleCollision(paddle.X, paddle.Y)
+			}
+		}
 
-	// Rally ramp: gradually accelerate the ball over time.
-	if g.ball.Speed < MaxBallSpeed {
-		g.ball.SetSpeed(math.Min(g.ball.Speed+RallyRamp*dt, MaxBallSpeed))
-	}
+		// Rally ramp: gradually accelerate the ball over time.
+		if g.ball.Speed < MaxBallSpeed {
+			g.ball.SetSpeed(math.Min(g.ball.Speed+RallyRamp*dt, MaxBallSpeed))
+		}
 
-	// Move ball and handle wall bounces.
-	g.ball.Update(dt)
+		// Move ball and handle wall bounces.
+		g.ball.Update(dt)
 
-	// Scoring: ball exits left or right edge.
-	if g.ball.X+2*BallRadius < 0 {
-		// Left edge — player 2 scores.
-		g.score[1]++
-		g.ball.Reset()
-	} else if g.ball.X > WindowX {
-		// Right edge — player 1 scores.
-		g.score[0]++
-		g.ball.Reset()
+		// Scoring: ball exits left or right edge.
+		if g.ball.X+2*BallRadius < 0 {
+			// Left edge — player 2 scores.
+			g.score[1]++
+			g.ball.Reset()
+			g.startServe()
+		} else if g.ball.X > WindowX {
+			// Right edge — player 1 scores.
+			g.score[0]++
+			g.ball.Reset()
+			g.startServe()
+		}
 	}
 
 	gameOver := g.score[0] >= WinScore || g.score[1] >= WinScore

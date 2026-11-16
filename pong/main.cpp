@@ -82,7 +82,7 @@ static void stepBall(BallState& b, float dt)
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
-    auto serverIp = sf::IpAddress::resolve("127.0.0.1");
+    auto serverIp = sf::IpAddress::resolve("3.26.50.54");
     
     if (!serverIp) {
         std::cerr << "Could not resolve server IP\n";
@@ -405,17 +405,16 @@ int main()
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Key::Down))
                     p1.moveDown(dt);
 
-                if (waitAfterScore)
-                {
-                    if (effects.enabled) {
-                        if (!effects.isCountdownActive())
-                            waitAfterScore = false;
-                    } else {
-                        if (pauseClock.getElapsedTime().asMilliseconds() >= 1000)
-                            waitAfterScore = false;
-                    }
+                bool countdownActive = effects.enabled ? effects.isCountdownActive() : waitAfterScore;
+                if (!effects.enabled && waitAfterScore) {
+                    if (pauseClock.getElapsedTime().asMilliseconds() >= 1000)
+                        waitAfterScore = false;
+                } else if (effects.enabled && waitAfterScore) {
+                    if (!effects.isCountdownActive())
+                        waitAfterScore = false;
                 }
-                else
+
+                if (!countdownActive)
                 {
                     ball.applyRamp(dt);
 
@@ -470,7 +469,7 @@ int main()
                     }
                 }
 
-                float spd = std::sqrt(ball.velocity.x * ball.velocity.x + ball.velocity.y * ball.velocity.y);
+                float spd = countdownActive ? 0.f : std::sqrt(ball.velocity.x * ball.velocity.x + ball.velocity.y * ball.velocity.y);
                 effects.pushTrail(ball.ball.getPosition() + sf::Vector2f(12.f, 12.f), spd);
             }
             else
@@ -564,12 +563,12 @@ int main()
 
                     // Sound: velocity sign change on the received packets (not render vel).
                     if (!scoreChanged) {
-                        if (prevVelX * latestVx < 0.f) {
+                        if (prevVelX != 0.f && latestVx != 0.f && prevVelX * latestVx < 0.f) {
                             sndPaddle.play();
                             int side = (latestVx > 0.f) ? 0 : 1;
                             effects.onPaddleHit(side, {renderBall.x + 12.f, renderBall.y + 12.f});
                         }
-                        if (prevVelY * latestVy < 0.f) {
+                        if (prevVelY != 0.f && latestVy != 0.f && prevVelY * latestVy < 0.f) {
                             sndWall.play();
                             effects.onWallHit({renderBall.x + 12.f, renderBall.y + 12.f});
                         }
