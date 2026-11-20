@@ -82,7 +82,7 @@ static void stepBall(BallState& b, float dt)
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
-    auto serverIp = sf::IpAddress::resolve("3.26.50.54");
+    auto serverIp = sf::IpAddress::resolve("129.225.99.54");
     
     if (!serverIp) {
         std::cerr << "Could not resolve server IP\n";
@@ -100,9 +100,8 @@ int main()
     sf::Font font;
     auto fontPath = getResourceDirectory() / "assets/fonts/game.ttf";
     if (!font.openFromFile(fontPath)) {
-        return -1;
+        return -1; 
     }
-
     // ── Sounds (all procedurally generated, no files needed) ─────────────────
     const sf::SoundBuffer bufPaddle  = makeBeep(480.f,  0.08f);
     const sf::SoundBuffer bufWall    = makeBeep(320.f,  0.05f);
